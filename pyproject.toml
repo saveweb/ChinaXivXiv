@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "chinaxivxiv"
+version = "0.1.0"
+description = ""
+authors = ["yzqzss <yzqzss@yandex.com>"]
+# readme = "README.md"
+packages = [
+    { include = "ChinaXivXiv"},
+]
+
+
+[tool.poetry.dependencies]
+python = "^3.10"
+httpx = "^0.25.1"
+motor = "^3.3.2"
+internetarchive = "^3.5.0"
+beautifulsoup4 = "^4.12.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,8 @@
+.vscode/
+dist/
+__pycache__/
+\!\!\!*
+core.html
+core_html/
+.ia_keys
+stop
