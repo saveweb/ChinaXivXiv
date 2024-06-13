@@ -20,7 +20,7 @@ from ChinaXivXiv.workers.metadata_scraper import get_chinaxivhtmlmetadata_from_h
 
 NOTES = """\
 - 元数据由脚本提取，仅供参考，以 ChinaXiv.org 官网为准。（如元数据识别有误/需要更新，请留言）
-- 截至 2023-11-28，ChinaXiv 背后的 istic.ac.cn 维护的 DOI 前缀 https://doi.org/10.12074 大量新论文的 DOI 链接无法正确重定向，因此使用者请谨慎使用 external-identifier 中的 DOI 链接。（使用前看下 DOI 跳转是否正常。如正常，则永久有效）
+- external-identifier 中的 DOI 链接由脚本提取，极有可能不准。使用前看下 DOI 跳转是否正常。如正常，则永久有效；如遇坏 identifier 可以尝试手动在 DOI 后加上V{版本号}。
 - 部分论文并没有使用 DOI 10.12074 前缀（例如 https://chinaxiv.org/abs/202205.00023 ），它们的元数据可能异常。
 - “版本历史”的“下载全文”按钮链接到的是 ChinaXiv.org 的原始链接，未来可能会失效。
 """
