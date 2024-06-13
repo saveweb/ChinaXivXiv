@@ -48,28 +48,16 @@ async def claim_task(queue: motor.motor_asyncio.AsyncIOMotorCollection,
         filter={"status": status_from},
         update={"$set": {
             "status": status_to,
-            "claim_at": datetime.utcnow(),
-            "update_at": datetime.utcnow(),
             }},
-        # sort=[("id", -1)],
+        sort=[("_id", -1)],
     )
     return Task(**TASK) if TASK else None
 
-async def update_task(queue: motor.motor_asyncio.AsyncIOMotorCollection, TASK: Task, status: str,
-                      headers: Optional[httpx.Headers] = None,
-                      metadata: "Task.metadata.__class__" = None):
+async def update_task(queue: motor.motor_asyncio.AsyncIOMotorCollection, TASK: Task, status: str):
     assert status in Status.__dict__.values()
     update = {"$set": {
             "status": status,
-            "update_at": datetime.utcnow(),
         }}
-    if headers:
-        update["$set"]["content_type"] = headers["Content-Type"]
-        update["$set"]["content_length"] = int(headers["Content-Length"])
-        update["$set"]["content_disposition"] = headers["Content-Disposition"]
-        update["$set"]["content_disposition_filename"] = headers["Content-Disposition"].split('"')[1]
-    if metadata:
-        update["$set"]["metadata"] = metadata
 
     await queue.update_one(
         filter={"_id": TASK._id},

@@ -5,8 +5,6 @@ from ChinaXivXiv.defines import END_FILEID
 
 @dataclass
 class Args:
-    mongo: str = "mongodb://localhost:27017"
-    """ mongodb://xxx:yy@zzz:1111 """
     task_provider: bool = False
     """ 定义为任务提供者，全局只能有一个 """
     end_fileid: int = END_FILEID
@@ -25,7 +23,6 @@ class Args:
 
 def arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mongo",          type=str,   default=Args.mongo,         help=Args.mongo)
     parser.add_argument("--task_provider",  action="store_true",  default=False,    help=str(Args.task_provider))
     parser.add_argument("--end_fileid",     type=int,   default=Args.end_fileid,    help=str(Args.end_fileid))
     parser.add_argument("--qos",            type=float,   default=Args.qos,           help=str(Args.qos))

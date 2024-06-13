@@ -5,17 +5,18 @@ from pprint import pprint
 import random
 import time
 import io
+from dataclasses import dataclass
 import traceback
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import httpx
 
 import internetarchive
 
 import motor.motor_asyncio
-from ChinaXivXiv.defines import Status, Task
+from ChinaXivXiv.defines import ChinaXivGlobalMetadata, ChinaXivHtmlMetadata, Status, Task
 from ChinaXivXiv.mongo_ops import claim_task, create_fileids_queue_index, find_max_id, init_queue, update_task
 from ChinaXivXiv.util import Args
-from ChinaXivXiv.workers.metadata_scraper import parse_keywords, parse_subjects
+from ChinaXivXiv.workers.metadata_scraper import get_chinaxivhtmlmetadata_from_html, get_core_html, parse_keywords, parse_subjects
 
 NOTES = """\
 - 元数据由脚本提取，仅供参考，以 ChinaXiv.org 官网为准。（如元数据识别有误/需要更新，请留言）
@@ -24,37 +25,59 @@ NOTES = """\
 - “版本历史”的“下载全文”按钮链接到的是 ChinaXiv.org 的原始链接，未来可能会失效。
 """
 
-async def IA_upload_worker(client: httpx.AsyncClient, c_queue: motor.motor_asyncio.AsyncIOMotorCollection, args: Args):
+async def IA_upload_worker(client: httpx.AsyncClient, collection: motor.motor_asyncio.AsyncIOMotorCollection, args: Args):
     while not os.path.exists("stop"):
         # 1. claim a task
-        TASK = await claim_task(c_queue, status_from=Status.METADATA_DONE, status_to=Status.UPLOADTOIA_PROCESSING)
-
-        # dry run
-        # TASK = await claim_task(c_queue, status_from=Status.METADATA_DONE, status_to=Status.METADATA_DONE)
-        # async def update_task(c_queue, task, status):  # noqa: F811
-        #     print(f"update_task: {task.id} {status}")
-
+        TASK = await claim_task(collection, status_from=Status.TODO, status_to=Status.UPLOADTOIA_PROCESSING)
         if not TASK:
             print("no task to claim, waiting...")
             await asyncio.sleep(random.randint(3, 10))
             continue
-
         # 2. process task
-        print(f"PROCESSING id: {TASK.id}")
-        try:
-            await async_upload(client, TASK)
-        except Exception as e:
-            traceback.print_exc()
-            print(repr(e))
-            await update_task(c_queue, TASK, Status.UPLOADTOIA_FAIL)
-            print("waiting 5 minutes...")
-            await asyncio.sleep(300)
-            continue
+        print(f"PROCESSING id: {TASK.identifier}")
 
-        # 3. update task
-        print(f"DONE id: {TASK.id}")
-        await update_task(c_queue, TASK, Status.UPLOADTOIA_DONE)
+        # curl 'https://global.chinaxiv.org/api/get_browse_db' -X POST -H 'Accept: application/json, text/plain, */*' -H 'Content-Type: application/json; charset=UTF-8' --data-raw '{"domains":[{"value":"chinaxiv_48172","select_value":"id"}],"dbs":["chinaxiv"]}' | jq
 
+        r_global_chinaxiv_metadata_from_get_browse_db = await client.post("https://global.chinaxiv.org/api/get_browse_db", json={
+            "domains": [{"value": TASK.identifier.removeprefix("localIdentifier:"), "select_value": "id"}], # chinaxiv_34185
+            "dbs": ["chinaxiv"]
+        })
+        metadata_from_browse_db_dblist = r_global_chinaxiv_metadata_from_get_browse_db.json()["dbList"]
+        assert len(metadata_from_browse_db_dblist) == 1
+        metadata_from_browse_db = metadata_from_browse_db_dblist[0]
+        assert metadata_from_browse_db["id"] == TASK.identifier.removeprefix("localIdentifier:")
+        version: str = metadata_from_browse_db["version"]
+        assert isinstance(version, str) and version.isdigit()
+
+        print(metadata_from_browse_db)
+
+        chinaxiv_global_metadata = ChinaXivGlobalMetadata(
+            title=TASK.metadata["title"],
+            author=TASK.metadata["author"] if "author" in TASK.metadata else None,
+            keyword=TASK.metadata["keyword"] if "keyword" in TASK.metadata else None,
+            article_id=TASK.metadata["article-id"],
+        )
+        print(chinaxiv_global_metadata.article_id)
+        versions = await collection.count_documents({"metadata.article-id": chinaxiv_global_metadata.article_id})
+        print(f"{TASK.identifier}, {TASK.metadata['article-id'][0]} has {versions} versions, this is version {version}")
+
+
+        chinaxiv_permanent_with_version_url = f"https://chinaxiv.org/abs/{TASK.metadata['article-id'][0]}v{version}"
+        print("CURL", chinaxiv_permanent_with_version_url)
+        headers = {
+            'Connection': 'close', # 对面服务器有点奇葩，HEAD 不会关闭连接……
+        }
+        r_html = await client.get(chinaxiv_permanent_with_version_url, headers=headers, follow_redirects=False)
+        assert r_html.status_code == 200
+
+        html_metadata = get_chinaxivhtmlmetadata_from_html(html=r_html.content, url=chinaxiv_permanent_with_version_url)
+        core_html = get_core_html(html=r_html.content, url=chinaxiv_permanent_with_version_url)
+
+
+        ia_identifier = await async_upload(client, html_metadata, core_html)
+        print(f"uploaded to IA: {ia_identifier}")
+
+        await update_task(collection, TASK, status=Status.UPLOADTOIA_DONE)
 
 def load_ia_keys():
     """ key_acc, key_sec """
@@ -88,40 +111,34 @@ def load_ia_keys():
 }
 """
 
-async def async_upload(client: httpx.AsyncClient, TASK: Task):
-    assert TASK.metadata, "metadata is None"
-    assert TASK.content_disposition_filename
-    assert TASK.content_disposition_filename.startswith(TASK.metadata["csoaid"])
-    assert f'{TASK.metadata["csoaid"]}v{TASK.metadata["version"]}.pdf' == TASK.content_disposition_filename
-    
-    chinaxiv_permanent_with_version_url = f'https://chinaxiv.org/abs/{TASK.metadata["csoaid"]}v{TASK.metadata["version"]}'
 
-    with open(f'core_html/{TASK.id}.html', 'r') as f:
-        core_html = f.read()
+async def async_upload(client: httpx.AsyncClient, html_metadata: ChinaXivHtmlMetadata, core_html: str):
+    assert html_metadata, "metadata is None"
+    assert f'{html_metadata.csoaid}v{html_metadata.version}.pdf'
+    
+    chinaxiv_permanent_with_version_url = f'https://chinaxiv.org/abs/{html_metadata.csoaid}v{html_metadata.version}'
 
     external_identifier = [
-        f'urn:chinaxiv:{TASK.metadata["csoaid"]}',
-        f'urn:chinaxiv:{TASK.metadata["csoaid"]}V{TASK.metadata["version"]}',
+        f'urn:chinaxiv:{html_metadata.csoaid}',
+        f'urn:chinaxiv:{html_metadata.csoaid}V{html_metadata.version}',
 
-        f'urn:doi:10.12074/{TASK.metadata["csoaid"]}',
+        f'urn:doi:10.12074/{html_metadata.csoaid}V{html_metadata.version}',
 
         # https://registry.identifiers.org/registry/cstr
         # e.x.: CSTR:32003.36.ChinaXiv.201604.00018.V2
-        f'urn:cstr:32003.36.ChinaXiv.{TASK.metadata["csoaid"]}.V{TASK.metadata["version"]}',
+        f'urn:cstr:32003.36.ChinaXiv.{html_metadata.csoaid}.V{html_metadata.version}',
     ]
-    subjects = parse_subjects(core_html.encode("utf-8"))
-    keywords = parse_keywords(core_html.encode("utf-8"))
 
-    YYYY = TASK.metadata["pubyear"]
+    YYYY = html_metadata.pubyear
     assert 1900 <= YYYY <= 2100
-    MM = TASK.metadata["csoaid"][4:6]
+    MM = html_metadata.csoaid[4:6]
     assert len(MM) == 2 and (1 <= int(MM) <= 12)
 
     metadata = {
-        "title": TASK.metadata["title"],
-        "creator": TASK.metadata["authors"], # List[str]
+        "title": html_metadata.title,
+        "creator": html_metadata.authors, # List[str]
         "date": f'{YYYY}-{MM}',
-        "subject": ["ChinaXiv", TASK.metadata["journal"]] + subjects + keywords, # TODO: may overflow 255 chars
+        "subject": ["ChinaXiv", html_metadata.journal] + html_metadata.subjects + html_metadata.keywords, # TODO: may overflow 255 chars
         "description": core_html,
         "source": chinaxiv_permanent_with_version_url,
         "external-identifier": external_identifier,
@@ -130,34 +147,35 @@ async def async_upload(client: httpx.AsyncClient, TASK: Task):
         "mediatype": "texts",
         "collection": "opensource",
         # "collection": "test_collection",
-        "scanner": "ChinaXivXiv v0.1.0", # TODO: update this
+        "scanner": "ChinaXivXiv v0.2.0", # TODO: update this
         "rights": "https://chinaxiv.org/user/license.htm",
         # ^^^^ IA native metadata ^^^^
 
         # vvvv custom metadata field vvvv
-        "journal": TASK.metadata["journal"],
+        "journal": html_metadata.journal,
 
-        "chinaxiv": TASK.metadata["csoaid"], # == chinaxiv_csoaid, so we can just search "chinaxiv:yyyymm.nnnnnn" to get the item on IA
-        "chinaxiv_id": TASK.id, # each version has a unique id, even if they have the same csoaid
-        "chinaxiv_copyQuotation": TASK.metadata["copyQuotation"], # 推荐引用格式 | suggested citation format
+        "chinaxiv": html_metadata.csoaid, # == chinaxiv_csoaid, so we can just search "chinaxiv:yyyymm.nnnnnn" to get the item on IA
+        "chinaxiv_id": html_metadata.chinaxiv_id, # each version has a unique id, even if they have the same csoaid
+        "chinaxiv_copyQuotation": html_metadata.copyQuotation, # 推荐引用格式 | suggested citation format
     }
-    identifier = f"ChinaXiv-{TASK.metadata['csoaid']}V{TASK.metadata['version']}"
-    # identifier = f"TEST-ChinaXiv-{TASK.metadata['csoaid']}V{TASK.metadata['version']}"
-    core_html_filename = f"{TASK.metadata['csoaid']}v{TASK.metadata['version']}-abs.html"
+    identifier = f"ChinaXiv-{html_metadata.csoaid}V{html_metadata.version}"
+    # identifier = f"TEST-ChinaXiv-{metadata.csoaid}V{metadata.version}"
+    core_html_filename = f"{html_metadata.csoaid}v{html_metadata.version}-abs.html"
     core_html_filename = None # TODO: DISABLE
-    file_name = TASK.content_disposition_filename
-    
-    # http://65.109.48.39:41830/chfs/shared/files/12335/201711.00804v1.pdf
-    if os.path.exists(f'files/{TASK.id}/{TASK.content_disposition_filename}'):
-        with open(f'files/{TASK.id}/{TASK.content_disposition_filename}', 'rb') as f:
-            file_content = f.read()
-    else:
-        direct_url_prefix = "http://65.109.48.39:41830/chfs/shared/files/"
-        print(f"downloading {direct_url_prefix}{TASK.id}/{TASK.content_disposition_filename} ... {TASK.content_length} bytes")
-        r = await client.get(f'{direct_url_prefix}{TASK.id}/{TASK.content_disposition_filename}')
-        assert r.status_code == 200
-        file_content = r.content
+
+    file_name = f'{html_metadata.csoaid}v{html_metadata.version}.pdf'
+    # https://chinaxiv.org/businessFile/201601/201601.00051v1/201601.00051v1.pdf
+    # https://chinaxiv.org/businessFile/202406/202406.00122v1/202406.00122v1.pdf
+    url = f"https://chinaxiv.org/businessFile/{html_metadata.csoaid.split('.')[0]}/{html_metadata.csoaid}v{html_metadata.version}/{html_metadata.csoaid}v{html_metadata.version}.pdf"
+    print(f"downloading {url}")
+    r = await client.get(url)
+    print(f"downloaded {url}, status_code: {r.status_code}, content_length: {len(r.content)}")
+    assert r.status_code == 200
+    file_content = r.content
     # pprint(metadata)
+    # asset it's pdf
+    assert file_content[:4] == b'%PDF'
+
     await do_upload(identifier, metadata,
                     core_html, core_html_filename,
                     file_content, file_name)

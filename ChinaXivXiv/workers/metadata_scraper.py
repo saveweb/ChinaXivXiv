@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup, element
 import motor.motor_asyncio
 import httpx
 
-from ChinaXivXiv.defines import Status, Task
+from ChinaXivXiv.defines import ChinaXivHtmlMetadata, Status, Task
 from ChinaXivXiv.exceptions import EmptyContent
 from ChinaXivXiv.mongo_ops import claim_task, update_task
 
@@ -226,6 +226,10 @@ def get_core_html(html: bytes, url: str):
     for copyBtn in core_html.find_all("span", {"id": "copyBtn"}):
         copyBtn.decompose()
 
+    # 删除 div id="journalSelect"
+    for journalSelect in core_html.find_all("div", {"id": "journalSelect"}):
+        journalSelect.decompose()
+
     # print(core_html.prettify())
     # 将相对链接转换为绝对链接
     for a in core_html.find_all("a"):
@@ -260,24 +264,34 @@ def parse_keywords(html: bytes):
             keywords.append(a.text.strip())
     return keywords            
 
+def get_chinaxivhtmlmetadata_from_html(html: bytes, url: str):
+    fileid, title, version, csoaid = parse_info_from_html(html)
+    copyQuotation = get_copyQuotation(html)
+    authors, pubyear, title, journal, prefer_identifier = parse_authors_from_copyQuotation(copyQuotation)
+    core_html = get_core_html(html, url)
+    metadata = ChinaXivHtmlMetadata(
+        chinaxiv_id=int(fileid),
+        title=title,
+        authors=authors,
+        journal=journal,
+        pubyear=pubyear,
+        version=version,
+        csoaid=csoaid,
+        copyQuotation=copyQuotation,
+        subjects=parse_subjects(html),
+        keywords=parse_keywords(html),
+        prefer_identifier=prefer_identifier
+    )
+    return metadata
 
 if __name__ == '__main__':
     def test_parse_info_from_html():
         client = httpx.Client()
         from ChinaXivXiv.defines import DEFAULT_HEADERS
         client.headers.update(DEFAULT_HEADERS)
-        r = client.get("https://chinaxiv.org/abs/201605.00707v1")
-        print(
-            parse_info_from_html(r.content)
-        )
-        
-        copyQuotation = get_copyQuotation(r.content)
-        print(copyQuotation)
-        print(parse_authors_from_copyQuotation(copyQuotation))
-
-        core_html = get_core_html(r.content, str(r.url))
-        print(parse_subjects(r.content))
-        print(parse_keywords(r.content))
-        print(len(core_html.encode("utf-8"))//1024, "KB HTML")
+        r = client.get("https://chinaxiv.org/abs/202311.00077v1")
+        assert r.status_code == 200
+        metadata = get_chinaxivhtmlmetadata_from_html(r.content, str(r.url))
+        print(metadata)
 
     test_parse_info_from_html()

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from bson import ObjectId
 
 END_FILEID = 78000
@@ -41,31 +41,39 @@ class Status:
 @dataclass
 class Task:
     _id: ObjectId
-    id: int
+    identifier: str
+    """ localIdentifier:chinaxiv_1041 """
     status: Status
-
-    claim_at: Optional[datetime] = None
-    update_at: Optional[datetime] = None
-
-    # downloading
-    content_type: Optional[str] = None
-    content_length: Optional[int] = None
-    content_disposition: Optional[str] = None
-    content_disposition_filename: Optional[str] = None
-    
-    
-    # metadata
-    metadata: Optional[Dict] = None
-    """
-    - title: Optional[str] = None
-    - authors: Optional[List[str]] = None
-    - journal: Optional[str] = None
-    - pubyear: Optional[int] = None
-    - version: Optional[int] = None
-    - csoaid: Optional[str] = None
-
-    - copyQuotation: Optional[str] = None
-    """
+    datestamp: str
+    metadata: Dict
 
     def __post_init__(self):
         assert self.status in Status.__dict__.values()
+
+
+@dataclass
+class ChinaXivHtmlMetadata:
+    chinaxiv_id: int
+    """ 又名 fileid """
+    title: str
+    authors: List[str]
+    journal: str
+    pubyear: int
+    version: int
+    csoaid: str
+    """ 又名 article-id """
+    copyQuotation: str
+
+    subjects: List[str]
+    keywords: List[str]
+
+    prefer_identifier: Optional[str]
+    """ DOI or csoaid """
+
+@dataclass
+class ChinaXivGlobalMetadata:
+    title: List[str]
+    article_id: List[str]
+    """ csoaid """
+    author: Optional[List[str]] = None
+    keyword: Optional[List[str]] = None
