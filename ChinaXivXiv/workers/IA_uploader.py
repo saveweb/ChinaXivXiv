@@ -68,6 +68,10 @@ async def IA_upload_worker(client: httpx.AsyncClient, collection: motor.motor_as
             'Connection': 'close', # 对面服务器有点奇葩，HEAD 不会关闭连接……
         }
         r_html = await client.get(chinaxiv_permanent_with_version_url, headers=headers, follow_redirects=False)
+        if r_html.status_code == 404:
+            print(f"404, skipping {chinaxiv_permanent_with_version_url}")
+            await update_task(collection, TASK, status=404)
+            continue
         assert r_html.status_code == 200
 
         html_metadata = get_chinaxivhtmlmetadata_from_html(html=r_html.content, url=chinaxiv_permanent_with_version_url)

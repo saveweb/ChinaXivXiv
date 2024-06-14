@@ -53,8 +53,8 @@ async def claim_task(queue: motor.motor_asyncio.AsyncIOMotorCollection,
     )
     return Task(**TASK) if TASK else None
 
-async def update_task(queue: motor.motor_asyncio.AsyncIOMotorCollection, TASK: Task, status: str):
-    assert status in Status.__dict__.values()
+async def update_task(queue: motor.motor_asyncio.AsyncIOMotorCollection, TASK: Task, status: str|int):
+    # assert status in Status.__dict__.values()
     update = {"$set": {
             "status": status,
         }}
