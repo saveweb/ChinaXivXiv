@@ -1,22 +1,17 @@
 import asyncio
-from datetime import datetime
 import os
-from pprint import pprint
 import random
 import time
 import io
-from dataclasses import dataclass
-import traceback
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import httpx
 
 import internetarchive
 
 import motor.motor_asyncio
-from ChinaXivXiv.defines import ChinaXivGlobalMetadata, ChinaXivHtmlMetadata, Status, Task
-from ChinaXivXiv.mongo_ops import claim_task, create_fileids_queue_index, find_max_id, init_queue, update_task
-from ChinaXivXiv.util import Args
-from ChinaXivXiv.workers.metadata_scraper import get_chinaxivhtmlmetadata_from_html, get_core_html, parse_keywords, parse_subjects
+from ChinaXivXiv.defines import ChinaXivGlobalMetadata, ChinaXivHtmlMetadata, Status
+from ChinaXivXiv.mongo_ops import claim_task, update_task
+from ChinaXivXiv.workers.metadata_scraper import get_chinaxivhtmlmetadata_from_html, get_core_html
 
 NOTES = """\
 - 元数据由脚本提取，仅供参考，以 ChinaXiv.org 官网为准。（如元数据识别有误/需要更新，请留言）
@@ -25,7 +20,7 @@ NOTES = """\
 - “版本历史”的“下载全文”按钮链接到的是 ChinaXiv.org 的原始链接，未来可能会失效。
 """
 
-async def IA_upload_worker(client: httpx.AsyncClient, collection: motor.motor_asyncio.AsyncIOMotorCollection, args: Args):
+async def IA_upload_worker(client: httpx.AsyncClient, collection: motor.motor_asyncio.AsyncIOMotorCollection):
     while not os.path.exists("stop"):
         # 1. claim a task
         TASK = await claim_task(collection, status_from=Status.TODO, status_to=Status.UPLOADTOIA_PROCESSING)
@@ -78,7 +73,7 @@ async def IA_upload_worker(client: httpx.AsyncClient, collection: motor.motor_as
         core_html = get_core_html(html=r_html.content, url=chinaxiv_permanent_with_version_url)
 
 
-        ia_identifier = await async_upload(client, html_metadata, core_html)
+        ia_identifier = await async_upload(client, metadata_from_browse_db, html_metadata, core_html)
         print(f"uploaded to IA: {ia_identifier}")
 
         await update_task(collection, TASK, status=Status.UPLOADTOIA_DONE)
@@ -116,7 +111,7 @@ def load_ia_keys():
 """
 
 
-async def async_upload(client: httpx.AsyncClient, html_metadata: ChinaXivHtmlMetadata, core_html: str):
+async def async_upload(client: httpx.AsyncClient, metadata_from_browse_db: Dict, html_metadata: ChinaXivHtmlMetadata, core_html: str):
     assert html_metadata, "metadata is None"
     assert f'{html_metadata.csoaid}v{html_metadata.version}.pdf'
     
@@ -133,16 +128,16 @@ async def async_upload(client: httpx.AsyncClient, html_metadata: ChinaXivHtmlMet
         f'urn:cstr:32003.36.ChinaXiv.{html_metadata.csoaid}.V{html_metadata.version}',
     ]
 
-    YYYY = html_metadata.pubyear
+    YYYY = html_metadata.pubyear if html_metadata.pubyear else int(metadata_from_browse_db["year"])
     assert 1900 <= YYYY <= 2100
     MM = html_metadata.csoaid[4:6]
     assert len(MM) == 2 and (1 <= int(MM) <= 12)
 
     metadata = {
-        "title": html_metadata.title,
-        "creator": html_metadata.authors, # List[str]
+        "title": html_metadata.title if html_metadata.title else metadata_from_browse_db["title"],
+        "creator": html_metadata.authors if html_metadata.authors else metadata_from_browse_db["authors"],
         "date": f'{YYYY}-{MM}',
-        "subject": ["ChinaXiv", html_metadata.journal] + html_metadata.subjects + html_metadata.keywords, # TODO: may overflow 255 chars
+        "subject": ["ChinaXiv"] + html_metadata.subjects + html_metadata.keywords, # TODO: may overflow 255 chars
         "description": core_html,
         "source": chinaxiv_permanent_with_version_url,
         "external-identifier": external_identifier,
@@ -156,12 +151,14 @@ async def async_upload(client: httpx.AsyncClient, html_metadata: ChinaXivHtmlMet
         # ^^^^ IA native metadata ^^^^
 
         # vvvv custom metadata field vvvv
-        "journal": html_metadata.journal,
 
         "chinaxiv": html_metadata.csoaid, # == chinaxiv_csoaid, so we can just search "chinaxiv:yyyymm.nnnnnn" to get the item on IA
         "chinaxiv_id": html_metadata.chinaxiv_id, # each version has a unique id, even if they have the same csoaid
         "chinaxiv_copyQuotation": html_metadata.copyQuotation, # 推荐引用格式 | suggested citation format
     }
+    if html_metadata.journal:
+        metadata['subject'].append(html_metadata.journal)
+        metadata['journal'] = html_metadata.journal
     identifier = f"ChinaXiv-{html_metadata.csoaid}V{html_metadata.version}"
     # identifier = f"TEST-ChinaXiv-{metadata.csoaid}V{metadata.version}"
     core_html_filename = f"{html_metadata.csoaid}v{html_metadata.version}-abs.html"

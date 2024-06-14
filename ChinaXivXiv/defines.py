@@ -5,7 +5,7 @@ from bson import ObjectId
 
 END_FILEID = 78000
 DEFAULT_HEADERS = {
-    "User-Agent": "ChinaXiv Archive Mirror Project/0.1.0 (STW; SaveTheWeb; +github.com/saveweb; saveweb@saveweb.org) (qos-rate-limit: 3q/s)",
+    "User-Agent": "ChinaXiv Archive Mirror Project/0.2.0 (STW; SaveTheWeb; +github.com/saveweb; saveweb@saveweb.org) (qos-rate-limit: 3q/s)",
 }
 DEBUG = 1
 
@@ -51,14 +51,21 @@ class Task:
         assert self.status in Status.__dict__.values()
 
 
+'''
+authors = None
+pubyear = None
+title = None
+journal = None
+prefer_identifier = None
+'''
 @dataclass
 class ChinaXivHtmlMetadata:
     chinaxiv_id: int
     """ 又名 fileid """
-    title: str
-    authors: List[str]
-    journal: str
-    pubyear: int
+    title: str | None
+    authors: List[str] | None
+    journal: str | None
+    pubyear: int | None
     version: int
     csoaid: str
     """ 又名 article-id """
@@ -67,7 +74,7 @@ class ChinaXivHtmlMetadata:
     subjects: List[str]
     keywords: List[str]
 
-    prefer_identifier: Optional[str]
+    prefer_identifier: str | None
     """ DOI or csoaid """
 
 @dataclass

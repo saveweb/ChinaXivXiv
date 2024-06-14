@@ -1,130 +1,8 @@
-import asyncio
-import os
-import random
-import traceback
 from bs4 import BeautifulSoup, element
 
-import motor.motor_asyncio
 import httpx
 
-from ChinaXivXiv.defines import ChinaXivHtmlMetadata, Status, Task
-from ChinaXivXiv.exceptions import EmptyContent
-from ChinaXivXiv.mongo_ops import claim_task, update_task
-
-
-async def metadata_scraper_worker(c_queue: motor.motor_asyncio.AsyncIOMotorCollection, client: httpx.AsyncClient):
-    REPRASE = 0
-    while not os.path.exists("stop"):
-        # 1. claim a task
-        if REPRASE:
-            TASK = await claim_task(c_queue, status_from=Status.METADATA_DONE, status_to=Status.METADATA_PROCESSING)
-            if not TASK:
-                print("no task to claim, exiting...")
-                return
-            print(f"REPRASE id: {TASK.id}")
-            assert TASK.metadata
-
-            copyQuotation = TASK.metadata["copyQuotation"]
-            authors, pubyear, _, journal, _prefer_identifier = parse_authors_from_copyQuotation(copyQuotation)
-            if authors != TASK.metadata["authors"]:
-                print("pubyear | journal | _prefer_identifier | authors")
-                print(" | ".join([str(pubyear), journal, _prefer_identifier, ",".join(authors)]))
-            new_metadata  = TASK.metadata
-            new_metadata["authors"] = authors
-            new_metadata["pubyear"] = pubyear
-            new_metadata["journal"] = journal
-            await update_task(c_queue, TASK, Status.METADATA_FAIL, metadata=new_metadata)
-            continue
-
-        TASK = await claim_task(c_queue, status_from=Status.DOWNLOAD_DONE, status_to=Status.METADATA_PROCESSING)
-        if not TASK:
-            print("no task to claim, waiting...")
-            await asyncio.sleep(random.randint(3, 10))
-            continue
-
-        # 2. process task
-        print(f"PROCESSING id: {TASK.id}")
-        try:
-            await asyncio.sleep(random.randint(0, 1))
-            r = await get_page_response(client, TASK)
-            if r.status_code == 404:
-                raise EmptyContent(f"status_code: {r.status_code}")
-            if r.status_code == 403:
-                print("403, sleep 15s")
-                await asyncio.sleep(15)
-            assert r.status_code == 200, f"status_code: {r.status_code}"
-        except EmptyContent as e:
-            print(TASK.id, 'EMPTY')
-            await update_task(c_queue, TASK, Status.METADATA_EMPTY)
-            continue
-        except Exception as e:
-            print(TASK.id, f'Error: {repr(e)}')
-            traceback.print_exc()
-            await update_task(c_queue, TASK, Status.METADATA_FAIL)
-            continue
-
-        # 3. parse HTML
-        print(f"Parsing HTML id: {TASK.id}")
-        try:
-            fileid, title, version, csoaid = parse_info_from_html(r.content)
-            
-            assert str(fileid) == str(TASK.id)
-            assert TASK.content_disposition_filename and \
-                   TASK.content_disposition_filename.startswith(csoaid)
-            assert f'v{version}' in TASK.content_disposition_filename.lower()
-            copyQuotation = get_copyQuotation(r.content)
-            authors, pubyear, _, journal, _prefer_identifier = parse_authors_from_copyQuotation(copyQuotation)
-            print("title | authors | journal | pubyear | version | csoaid | _prefer_identifier")
-            print(authors, journal, str(pubyear), str(version), csoaid, _prefer_identifier)
-
-            core_html = get_core_html(r.content, str(r.url))
-            os.makedirs("core_html", exist_ok=True)
-            with open(f"core_html/{TASK.id}.html", "w") as f:
-                f.write(core_html)
-
-            # 4. update task
-            print(f"DONE id: {TASK.id}")
-            print(copyQuotation)
-            # metadata: Task.metadata
-            await update_task(c_queue, TASK, Status.METADATA_DONE, metadata={
-                "title": title,
-                "authors": authors,
-                "journal": journal,
-                "pubyear": pubyear,
-                "version": version,
-                "csoaid": csoaid,
-
-                "copyQuotation": copyQuotation,
-            })
-
-
-        except Exception as e:
-            print(TASK.id, str(r.url), f'Error: {repr(e)}')
-            traceback.print_exc()
-            await update_task(c_queue, TASK, Status.METADATA_FAIL)
-            continue
-
-
-
-
-async def get_page_response(client: httpx.AsyncClient, TASK: Task):
-    headers = {
-        'Connection': 'close', # 对面服务器有点奇葩，HEAD 不会关闭连接……
-    }
-        # content_disposition_filename: '201604.00018v2.pdf',
-
-    assert TASK.content_disposition_filename is not None
-    assert TASK.content_disposition_filename.endswith(".pdf")
-
-    str_parts = TASK.content_disposition_filename.split(".")
-    assert len(str_parts) == 3
-    chinaxiv_id_with_version = ".".join(str_parts[:len(str_parts)-1])
-    assert len(chinaxiv_id_with_version.split(".")) == 2
-
-    # 201604.00018v2
-    chinaxiv_permanent_with_version_url = f"https://chinaxiv.org/abs/{chinaxiv_id_with_version}"
-    print("CURL", chinaxiv_permanent_with_version_url)
-    return await client.get(chinaxiv_permanent_with_version_url, headers=headers, follow_redirects=False)
+from ChinaXivXiv.defines import ChinaXivHtmlMetadata
 
 
 
@@ -167,47 +45,67 @@ def get_copyQuotation(html: bytes):
 # <span id="copyQuotation">薛康佳,张玉亮,王林,吴煊,李明涛,何泳成,朱鹏.(2023).CSNS EPICS PV信息平台的设计与实现.原子核物理评论.doi:10.12074/202311.00062V1 </span>
 # 何厚军,韩运成,王晓彧,刘玉敏,张佳辰,任雷,郑明杰.(2023).基于载流子演化的3D P+PNN+多沟槽结构提升Betavoltaic核电池性能.中国科学院科技论文预发布平台.doi:10.12074/202310.00022V1
 # Debbie F. Crawford,Michael H. O'Connor,Tom Jovanovic,Alexander Herr,Robert John Raison,Deborah A. O'Connell,Tim Baynes.(2016).A spatial assessment of potential biomass for bioenergy in Australia in 2010, and possible expansion by 2030 and 2050.GCB Bioenergy.[ChinaXiv:201605.00524]
-
+# .(2024).快速射电暴观测数据干扰缓解方法研究.天文学报.doi:10.15940/j.cnki.0001-5245.2024.02.010
 # authors.({pubyear:int}).title.journal.{identifier}
 def parse_authors_from_copyQuotation(copyQuotation: str):
 
     authors_text = copyQuotation.split(".(")[0]
     authors = []
 
-    author = ""
-    for idx, char in enumerate(authors_text):
-        if idx == len(authors_text)-1 and char == ",": # 最后一个字符是逗号
-            continue # 忽略
+    try:
+        author = ""
+        for idx, char in enumerate(authors_text):
+            if idx == len(authors_text)-1 and char == ",": # 最后一个字符是逗号
+                continue # 忽略
 
-        if char == "," and (authors_text[idx+1] != " "): # 逗号后面无空格
+            if char == "," and (authors_text[idx+1] != " "): # 逗号后面无空格
+                authors.append(author)
+                author = ""
+            else: # 不是逗号/逗号后面有空格（人名的一部分）
+                author += char
+        if author:
             authors.append(author)
-            author = ""
-        else: # 不是逗号/逗号后面有空格（人名的一部分）
-            author += char
-    if author:
-        authors.append(author)
 
-    assert authors
+        if authors_text:
+            assert authors, f"{authors_text} | {authors}"
+    except Exception as e:
+        authors = None
 
 
-    pubyear = "".join(
-        [char for char in copyQuotation.split(".(")[1].split(").")[0] if char.isdigit()]
-    )
-    assert pubyear
-    pubyear = int(pubyear)
+    try:
+        pubyear = "".join(
+            [char for char in copyQuotation.split(".(")[1].split(").")[0] if char.isdigit()]
+        )
+        assert pubyear
+        pubyear = int(pubyear)
+    except Exception as e:
+        pubyear = None
 
-    text_after_pubyear = copyQuotation.split(".(")[1:]
-    text_after_pubyear = ".(".join(text_after_pubyear)
-    text_after_pubyear = text_after_pubyear.split(").")[1:]
-    text_after_pubyear = ").".join(text_after_pubyear)
+    try:
+        text_after_pubyear = copyQuotation.split(".(")[1:]
+        text_after_pubyear = ".(".join(text_after_pubyear)
+        text_after_pubyear = text_after_pubyear.split(").")[1:]
+        text_after_pubyear = ").".join(text_after_pubyear)
+    except Exception as e:
+        text_after_pubyear = None
 
-    title = text_after_pubyear.split(".")[0]
-    assert title
+    try:
+        title = text_after_pubyear.split(".")[0]
+        assert title
+    except Exception as e:
+        title = None
 
-    journal = text_after_pubyear.split(".")[1]
+    try:
+        journal = text_after_pubyear.split(".")[1]
+        assert journal
+    except Exception as e:
+        journal = None
 
-
-    prefer_identifier = ".".join(text_after_pubyear.split(".")[2:])
+    try:
+        prefer_identifier = ".".join(text_after_pubyear.split(".")[2:])
+        assert prefer_identifier
+    except Exception as e:
+        prefer_identifier = None
 
     return authors, pubyear, title, journal, prefer_identifier
     
