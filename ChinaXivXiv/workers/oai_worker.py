@@ -51,7 +51,8 @@ async def main():
                 docs.append({
                     "identifier": record.header.identifier,
                     "datestamp": record.header.datestamp,
-                    "metadata": record.metadata
+                    "metadata": record.metadata,
+                    "status": "TODO",
                 })
         except oaipmh_scythe.exceptions.NoRecordsMatch:
             print("NoRecordsMatch")
